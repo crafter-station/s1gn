@@ -1,5 +1,6 @@
 import Image from 'next/image';
 import Link from 'next/link';
+import { DeleteVideoButton } from './DeleteVideoButton';
 import type { Video } from '@/types/video';
 
 function fmtDuration(sec: number): string {
@@ -37,6 +38,11 @@ export function VideoCard({ video }: { video: Video }) {
         <span className="absolute bottom-2 right-2 bg-bg/90 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-ink">
           {fmtDuration(video.durationSec)}
         </span>
+        <DeleteVideoButton
+          videoId={video.id}
+          ownerFingerprintHash={video.ownerFingerprintHash}
+          variant="card"
+        />
       </div>
       <div className="flex items-start justify-between gap-3">
         <h3 className="line-clamp-2 text-base font-medium leading-snug text-ink">{video.title}</h3>

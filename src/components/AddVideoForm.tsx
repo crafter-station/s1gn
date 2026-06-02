@@ -3,14 +3,17 @@
 import { useActionState } from 'react';
 import { useFormStatus } from 'react-dom';
 import { addVideoAction, type AddVideoState } from '@/app/actions/videos';
+import { useFingerprint } from '@/lib/fingerprint-client';
 
 const initial: AddVideoState = {};
 
 export function AddVideoForm() {
   const [state, formAction] = useActionState(addVideoAction, initial);
+  const fingerprint = useFingerprint();
 
   return (
     <form action={formAction} className="w-full">
+      <input type="hidden" name="fingerprint" value={fingerprint ?? ''} />
       <div className="flex flex-col gap-3 sm:flex-row">
         <input
           name="url"
@@ -21,7 +24,7 @@ export function AddVideoForm() {
           autoComplete="off"
           inputMode="url"
         />
-        <SubmitButton />
+        <SubmitButton disabled={!fingerprint} />
       </div>
       {state.error ? (
         <p className="mt-3 text-sm text-accent">{state.error}</p>
@@ -34,12 +37,12 @@ export function AddVideoForm() {
   );
 }
 
-function SubmitButton() {
+function SubmitButton({ disabled }: { disabled?: boolean }) {
   const { pending } = useFormStatus();
   return (
     <button
       type="submit"
-      disabled={pending}
+      disabled={pending || disabled}
       className="h-14 whitespace-nowrap rounded-none border border-ink bg-ink px-6 text-sm font-medium uppercase tracking-[0.18em] text-bg transition-colors hover:bg-accent hover:border-accent disabled:cursor-progress disabled:opacity-60"
     >
       {pending ? 'processing…' : 'make karaoke'}

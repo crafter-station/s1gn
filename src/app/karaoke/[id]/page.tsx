@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import { DeleteVideoButton } from '@/components/DeleteVideoButton';
 import { KaraokePlayer } from '@/components/KaraokePlayer';
 import { videoRepo } from '@/lib/repositories';
 
@@ -12,13 +13,21 @@ export default async function KaraokePage({ params }: { params: Promise<{ id: st
 
   return (
     <div className="container-page pb-24">
-      <div className="hairline mb-6 flex items-baseline justify-between pt-6">
+      <div className="hairline mb-6 flex items-center justify-between pt-6">
         <Link href="/" className="text-xs uppercase tracking-[0.18em] text-mute hover:text-ink">
           ← library
         </Link>
-        <span className="text-xs uppercase tracking-[0.18em] text-mute">
-          {video.language ?? '—'} · {video.status}
-        </span>
+        <div className="flex items-center gap-4">
+          <span className="text-xs uppercase tracking-[0.18em] text-mute">
+            {video.language ?? '—'} · {video.status}
+          </span>
+          <DeleteVideoButton
+            videoId={video.id}
+            ownerFingerprintHash={video.ownerFingerprintHash}
+            variant="inline"
+            redirectHome
+          />
+        </div>
       </div>
 
       <h1 className="mb-8 font-display text-3xl font-semibold leading-tight tracking-tightest sm:text-5xl">

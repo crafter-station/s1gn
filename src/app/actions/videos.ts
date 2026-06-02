@@ -4,6 +4,7 @@ import { unlink, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
+import { hashFingerprint, isValidFingerprint } from '@/lib/fingerprint';
 import { redis } from '@/lib/redis';
 import { videoRepo } from '@/lib/repositories';
 import { buildLines } from '@/lib/transcribe/build-lines';
@@ -12,12 +13,18 @@ import { parseYoutubeId, InvalidYoutubeUrlError } from '@/lib/youtube/url';
 import { downloadAudio } from '@/lib/youtube/ytdlp';
 
 export type AddVideoState = { error?: string };
+export type DeleteVideoState = { error?: string };
 
 export async function addVideoAction(
   _prev: AddVideoState,
   formData: FormData,
 ): Promise<AddVideoState> {
   const url = String(formData.get('url') ?? '');
+  const rawFingerprint = formData.get('fingerprint');
+  const ownerFingerprintHash = isValidFingerprint(rawFingerprint)
+    ? hashFingerprint(rawFingerprint)
+    : null;
+
   let youtubeId: string;
   try {
     youtubeId = parseYoutubeId(url);
@@ -52,6 +59,7 @@ export async function addVideoAction(
       thumbnailUrl: audio.thumbnailUrl,
       durationSec: audio.durationSec,
       status: 'processing',
+      ownerFingerprintHash,
     });
     createdId = video.id;
 
@@ -81,4 +89,30 @@ async function cleanup(audioPath: string | null): Promise<void> {
   } catch {
     // best effort
   }
+}
+
+export async function deleteVideoAction(
+  _prev: DeleteVideoState,
+  formData: FormData,
+): Promise<DeleteVideoState> {
+  const id = String(formData.get('id') ?? '');
+  const rawFingerprint = formData.get('fingerprint');
+
+  if (!id) return { error: 'Missing video id.' };
+  if (!isValidFingerprint(rawFingerprint)) {
+    return { error: 'Missing or invalid fingerprint.' };
+  }
+
+  const hash = hashFingerprint(rawFingerprint);
+  let removed = false;
+  try {
+    removed = await videoRepo.deleteIfOwner(id, hash);
+  } catch (e) {
+    return { error: `Could not delete: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  if (!removed) return { error: 'You can only delete videos you added from this browser.' };
+
+  revalidatePath('/');
+  return {};
 }

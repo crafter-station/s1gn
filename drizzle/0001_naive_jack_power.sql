@@ -1,0 +1,1 @@
+ALTER TABLE "videos" ADD COLUMN "owner_fingerprint_hash" text;

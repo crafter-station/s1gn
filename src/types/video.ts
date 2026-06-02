@@ -22,6 +22,7 @@ export type Video = {
   status: VideoStatus;
   errorMessage: string | null;
   lyrics: LyricLine[] | null;
+  ownerFingerprintHash: string | null;
   createdAt: Date;
 };
 
@@ -31,4 +32,5 @@ export type NewVideo = {
   thumbnailUrl: string;
   durationSec: number;
   status: VideoStatus;
+  ownerFingerprintHash?: string | null;
 };

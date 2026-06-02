@@ -1,4 +1,4 @@
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { db, schema } from '@/lib/db/client';
 import type { VideoRow } from '@/lib/db/schema';
 import type { LyricLine, NewVideo, Video } from '@/types/video';
@@ -15,6 +15,7 @@ function toDomain(row: VideoRow): Video {
     status: row.status,
     errorMessage: row.errorMessage,
     lyrics: row.lyrics ?? null,
+    ownerFingerprintHash: row.ownerFingerprintHash ?? null,
     createdAt: row.createdAt,
   };
 }
@@ -52,6 +53,7 @@ export class DrizzleVideoRepository implements VideoRepository {
         thumbnailUrl: input.thumbnailUrl,
         durationSec: input.durationSec,
         status: input.status,
+        ownerFingerprintHash: input.ownerFingerprintHash ?? null,
       })
       .returning();
     return toDomain(row);
@@ -69,5 +71,18 @@ export class DrizzleVideoRepository implements VideoRepository {
       .update(schema.videos)
       .set({ status: 'failed', errorMessage: error.slice(0, 1000) })
       .where(eq(schema.videos.id, id));
+  }
+
+  async deleteIfOwner(id: string, fingerprintHash: string): Promise<boolean> {
+    const deleted = await db
+      .delete(schema.videos)
+      .where(
+        and(
+          eq(schema.videos.id, id),
+          eq(schema.videos.ownerFingerprintHash, fingerprintHash),
+        ),
+      )
+      .returning({ id: schema.videos.id });
+    return deleted.length > 0;
   }
 }

@@ -10,6 +10,7 @@ export const videos = pgTable('videos', {
   language: text('language'),
   status: text('status').notNull().$type<'processing' | 'ready' | 'failed'>(),
   errorMessage: text('error_message'),
+  ownerFingerprintHash: text('owner_fingerprint_hash'),
   lyrics: jsonb('lyrics').$type<LyricLine[]>(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 });
