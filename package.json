@@ -20,6 +20,8 @@
     "postgres": "^3.4.5",
     "ioredis": "^5.4.1",
     "openai": "^4.77.0",
+    "ai": "^4.0.40",
+    "@ai-sdk/openai": "^1.0.20",
     "kuroshiro": "^1.2.0",
     "kuroshiro-analyzer-kuromoji": "^1.1.0",
     "hangul-romanization": "^1.0.1",

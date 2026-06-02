@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { detectSongLanguage } from '@/lib/transcribe/detect-language';
 import { youtubeWatchUrl } from './url';
 
 // Language priority for picking the best subtitle track.
@@ -37,18 +38,34 @@ export class SubtitlesFetchError extends Error {
   }
 }
 
+/**
+ * Two-step fetch designed to avoid YouTube's per-IP rate limit on the
+ * auto-translation endpoint:
+ *
+ *   1. **Phase 1** — one yt-dlp call: metadata + **manual subs only** in our
+ *      priority languages. Manual subs don't go through the translation
+ *      service, so this never triggers 429. If a usable manual track exists
+ *      we use it and stop here.
+ *
+ *   2. **Phase 2** — only if Phase 1 found nothing. One more yt-dlp call for
+ *      the auto-caption track in **just** the video's declared source
+ *      language. Single track = single download = no rate-limit explosion.
+ *
+ * Anything else (failure of Phase 1 entirely, or Phase 2 not applicable)
+ * returns `subtitles: null`, which lets the caller fall back to Whisper.
+ */
 export async function fetchSubtitlesAndMeta(youtubeId: string): Promise<SubtitlesAndMeta> {
   const dir = await mkdtemp(join(tmpdir(), `s1ng-subs-${youtubeId}-`));
   try {
-    const args = [
+    // Phase 1: metadata + manual subs in priority languages. The wildcard
+    // suffixes match regional variants (es-419, ja-JP, etc.) without
+    // triggering auto-translation requests, since --write-auto-subs is OFF.
+    const phase1Args = [
       '--skip-download',
       '--write-info-json',
       '--write-subs',
-      '--write-auto-subs',
       '--sub-langs',
-      // Comma list of preferred langs + common variants.
-      // yt-dlp will write any that exist; we pick the best afterwards.
-      'ko,ko-KR,ja,ja-JP,es,es-419,es-ES,en,en-US,en-GB,en-orig',
+      'ko,ja,es,en,ko.*,ja.*,es.*,en.*',
       '--sub-format',
       'vtt',
       '--no-progress',
@@ -58,11 +75,11 @@ export async function fetchSubtitlesAndMeta(youtubeId: string): Promise<Subtitle
       youtubeWatchUrl(youtubeId),
     ];
 
-    const { stderr, code } = await runYtdlp(args);
-    if (code !== 0) {
+    const phase1 = await runYtdlp(phase1Args);
+    if (phase1.code !== 0) {
       throw new SubtitlesFetchError(
-        `yt-dlp exited with code ${code}: ${summarize(stderr)}`,
-        stderr,
+        `yt-dlp exited with code ${phase1.code}: ${summarize(phase1.stderr)}`,
+        phase1.stderr,
       );
     }
 
@@ -78,14 +95,62 @@ export async function fetchSubtitlesAndMeta(youtubeId: string): Promise<Subtitle
         : `https://i.ytimg.com/vi/${youtubeId}/hqdefault.jpg`;
     const declaredLanguage: string | null =
       typeof info?.language === 'string' ? String(info.language) : null;
+    const description: string | null =
+      typeof info?.description === 'string' ? String(info.description) : null;
 
     const manualTracks: Record<string, unknown> =
       info?.subtitles && typeof info.subtitles === 'object'
         ? (info.subtitles as Record<string, unknown>)
         : {};
 
-    const files = await readdir(dir);
-    const picked = pickBestVtt(files, youtubeId);
+    // Detect the song's actual language. We try signals in order of accuracy:
+    //   1. LLM analysis of title + description (handles covers, dubs, mixed
+    //      titles like "Momoland - Baam Baam Japanese Version" where the
+    //      song is JP but the artist & original are KR).
+    //   2. Title script analysis (deterministic, free, handles ja/ko via
+    //      Unicode ranges) — fallback when the LLM is unavailable.
+    //   3. yt-dlp's `info.language` (uploader-tagged; often missing/wrong).
+    const llmLang = await detectSongLanguage(title, description);
+    const titleLang = llmLang ? null : detectLangFromTitle(title);
+    const declaredBase = declaredLanguage
+      ? declaredLanguage.toLowerCase().split(/[-.]/)[0]
+      : null;
+    const sourceLang =
+      llmLang ??
+      titleLang ??
+      (declaredBase && (PRIORITY_LANGS as readonly string[]).includes(declaredBase)
+        ? declaredBase
+        : null);
+
+    // Look for a manual sub we can use, preferring the detected source lang
+    // over the default priority order.
+    let picked = pickManualVtt(await readdir(dir), youtubeId, manualTracks, sourceLang);
+
+    // Phase 2: no manual sub matched — try the auto-caption in the detected
+    // source language. We deliberately don't fetch other languages because
+    // they'd be machine-translated and labeled wrong.
+    if (!picked && sourceLang) {
+      const phase2Args = [
+        '--skip-download',
+        '--write-auto-subs',
+        '--sub-langs',
+        sourceLang,
+        '--sub-format',
+        'vtt',
+        '--no-progress',
+        '--no-playlist',
+        '-o',
+        join(dir, '%(id)s'),
+        youtubeWatchUrl(youtubeId),
+      ];
+      const phase2 = await runYtdlp(phase2Args);
+      if (phase2.code === 0) {
+        const hit = findVttForBaseLang(await readdir(dir), youtubeId, sourceLang);
+        if (hit) picked = { ...hit, lang: sourceLang, isManual: false };
+      }
+      // If phase 2 fails (429, network, etc.) fall through silently so the
+      // caller can use Whisper. Don't fail the whole video.
+    }
 
     if (!picked) {
       return { title, durationSec, thumbnailUrl, declaredLanguage, subtitles: null };
@@ -97,41 +162,96 @@ export async function fetchSubtitlesAndMeta(youtubeId: string): Promise<Subtitle
       return { title, durationSec, thumbnailUrl, declaredLanguage, subtitles: null };
     }
 
-    const isAuto = !manualTracks[picked.fullLang] && !manualTracks[picked.lang];
-
     return {
       title,
       durationSec,
       thumbnailUrl,
       declaredLanguage,
-      subtitles: { language: picked.lang, cues, isAuto },
+      subtitles: { language: picked.lang, cues, isAuto: !picked.isManual },
     };
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 }
 
-function pickBestVtt(
+function isManualTrack(manualKeys: string[], fullLang: string): boolean {
+  if (manualKeys.includes(fullLang)) return true;
+  const baseLang = fullLang.split(/[-.]/)[0];
+  return manualKeys.some((k) => k === baseLang || k.split(/[-.]/)[0] === baseLang);
+}
+
+function findVttForBaseLang(
+  vttFiles: string[],
+  youtubeId: string,
+  baseLang: string,
+): { file: string; fullLang: string } | null {
+  const exact = vttFiles.find((f) => f === `${youtubeId}.${baseLang}.vtt`);
+  if (exact) return { file: exact, fullLang: baseLang };
+
+  const variant = vttFiles.find((f) => {
+    const middle = f.slice(youtubeId.length + 1, -4);
+    return middle.split(/[-.]/)[0] === baseLang;
+  });
+  if (variant) {
+    return { file: variant, fullLang: variant.slice(youtubeId.length + 1, -4) };
+  }
+  return null;
+}
+
+/**
+ * Pick a manual subtitle track. Tries the detected source language first
+ * (e.g. for a Japanese song with both `ja` and `en` manual subs, pick `ja`
+ * even though our default priority lists `ko` first), then falls back to
+ * the default `PRIORITY_LANGS` order.
+ */
+function pickManualVtt(
   files: string[],
   youtubeId: string,
-): { file: string; lang: string; fullLang: string } | null {
+  manualTracks: Record<string, unknown>,
+  sourceLang: string | null,
+): { file: string; lang: string; fullLang: string; isManual: boolean } | null {
   const vttFiles = files.filter((f) => f.startsWith(`${youtubeId}.`) && f.endsWith('.vtt'));
   if (vttFiles.length === 0) return null;
 
-  for (const baseLang of PRIORITY_LANGS) {
-    // Prefer the exact base lang, fall back to any regional variant (e.g. "es-419").
-    const exact = vttFiles.find((f) => f === `${youtubeId}.${baseLang}.vtt`);
-    if (exact) return { file: exact, lang: baseLang, fullLang: baseLang };
+  const manualKeys = Object.keys(manualTracks);
+  const order: string[] = [];
+  if (sourceLang && (PRIORITY_LANGS as readonly string[]).includes(sourceLang)) {
+    order.push(sourceLang);
+  }
+  for (const l of PRIORITY_LANGS) if (!order.includes(l)) order.push(l);
 
-    const variant = vttFiles.find((f) => {
-      const middle = f.slice(youtubeId.length + 1, -4);
-      return middle.split(/[-.]/)[0] === baseLang;
-    });
-    if (variant) {
-      const fullLang = variant.slice(youtubeId.length + 1, -4);
-      return { file: variant, lang: baseLang, fullLang };
+  for (const baseLang of order) {
+    const hit = findVttForBaseLang(vttFiles, youtubeId, baseLang);
+    if (hit && isManualTrack(manualKeys, hit.fullLang)) {
+      return { ...hit, lang: baseLang, isManual: true };
     }
   }
+  return null;
+}
+
+/**
+ * Detect the song's language from its title using script analysis.
+ * Returns `null` for purely Latin titles where en/es can't be distinguished
+ * by script alone (and where romanization is a no-op anyway).
+ *
+ * This is the most reliable signal we have — far more reliable than
+ * yt-dlp's `info.language` (frequently missing or mis-tagged by uploaders).
+ */
+function detectLangFromTitle(title: string): 'ja' | 'ko' | null {
+  let jaScore = 0;
+  let koScore = 0;
+  for (const ch of title) {
+    const c = ch.codePointAt(0);
+    if (!c) continue;
+    if (c >= 0x3040 && c <= 0x309f) jaScore += 2;      // hiragana
+    else if (c >= 0x30a0 && c <= 0x30ff) jaScore += 2; // katakana
+    else if (c >= 0xac00 && c <= 0xd7a3) koScore += 2; // hangul syllables
+    else if (c >= 0x1100 && c <= 0x11ff) koScore += 1; // hangul jamo
+    else if (c >= 0x3130 && c <= 0x318f) koScore += 1; // hangul compat jamo
+    else if (c >= 0x4e00 && c <= 0x9fff) jaScore += 1; // CJK ideographs (treat as ja in our domain)
+  }
+  if (koScore >= 2 && koScore >= jaScore) return 'ko';
+  if (jaScore >= 2) return 'ja';
   return null;
 }
 
