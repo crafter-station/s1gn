@@ -29,9 +29,11 @@ Open http://localhost:3000.
 ## How it works
 
 1. Paste a YouTube URL on the home page.
-2. The server action downloads the audio with `yt-dlp`, transcribes it with the Whisper API (`verbose_json`, word-level timestamps), and — for `ja`/`ko` — romanizes each word.
-3. The result is stored in Postgres (one `videos` row, lyrics as a `jsonb` blob).
-4. The karaoke page embeds the YouTube IFrame Player and uses a `requestAnimationFrame` loop on `getCurrentTime()` to highlight the active word and preview the next line.
+2. The server action calls `yt-dlp` once to fetch the video metadata **and** any available subtitle tracks (manual or auto-generated), in priority order `ko → ja → es → en`. If a suitable subtitle track is found, it's used as the source of truth — much more accurate than Whisper, especially for non-English music with mixed-language lyrics (e.g. K-pop with embedded English phrases). The full audio download and Whisper call are skipped.
+3. If no usable subtitles exist, fall back to: download audio with `yt-dlp`, transcribe with the Whisper API (`verbose_json`, word-level timestamps).
+4. For `ja`/`ko` lyrics, the text is romanized via kuroshiro (Japanese, segment-level for context) or hangul-romanization (Korean, character-level). Latin characters (English / Spanish words within Korean lyrics, for instance) pass through unchanged.
+5. The result is stored in Postgres (one `videos` row, lyrics as a `jsonb` blob).
+6. The karaoke page embeds the YouTube IFrame Player and uses a `requestAnimationFrame` loop on `getCurrentTime()` to highlight the active word and preview the next line.
 
 ## Architecture
 
@@ -42,8 +44,8 @@ src/
   lib/
     db/                      — Drizzle schema + postgres-js client
     redis.ts                 — ioredis singleton (dedup lock)
-    youtube/                 — URL parsing + yt-dlp wrapper
-    transcribe/              — Whisper + romanize (kuroshiro / korean-romanization)
+    youtube/                 — URL parsing, yt-dlp audio wrapper, subtitle fetch + VTT parser
+    transcribe/              — Whisper + romanize + line builders (per-word Whisper / segment Whisper / subtitle cues)
     repositories/            — VideoRepository interface + Drizzle implementation
   types/                     — shared domain types
 ```

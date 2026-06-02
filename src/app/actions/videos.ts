@@ -8,7 +8,9 @@ import { hashFingerprint, isValidFingerprint } from '@/lib/fingerprint';
 import { redis } from '@/lib/redis';
 import { videoRepo } from '@/lib/repositories';
 import { buildLines } from '@/lib/transcribe/build-lines';
+import { buildLinesFromCues } from '@/lib/transcribe/build-lines-from-cues';
 import { transcribe } from '@/lib/transcribe/whisper';
+import { fetchSubtitlesAndMeta } from '@/lib/youtube/subtitles';
 import { parseYoutubeId, InvalidYoutubeUrlError } from '@/lib/youtube/url';
 import { downloadAudio } from '@/lib/youtube/ytdlp';
 
@@ -50,23 +52,33 @@ export async function addVideoAction(
   let audioPath: string | null = null;
   let createdId: string | null = null;
   try {
-    const audio = await downloadAudio(youtubeId);
-    audioPath = audio.path;
+    // Step 1: fetch metadata + try to get official YouTube subtitles in one shot.
+    const meta = await fetchSubtitlesAndMeta(youtubeId);
 
     const video = await videoRepo.create({
       youtubeId,
-      title: audio.title,
-      thumbnailUrl: audio.thumbnailUrl,
-      durationSec: audio.durationSec,
+      title: meta.title,
+      thumbnailUrl: meta.thumbnailUrl,
+      durationSec: meta.durationSec,
       status: 'processing',
       ownerFingerprintHash,
     });
     createdId = video.id;
 
-    const result = await transcribe(audio.path);
-    const lines = await buildLines(result);
-
-    await videoRepo.markReady(video.id, lines, result.language);
+    if (meta.subtitles) {
+      // Step 2a: subs found → use them as the source of truth.
+      // Romanization happens inside buildLinesFromCues for ja/ko;
+      // English/Spanish words within mixed lines are passed through unchanged.
+      const lines = await buildLinesFromCues(meta.subtitles.cues, meta.subtitles.language);
+      await videoRepo.markReady(video.id, lines, meta.subtitles.language);
+    } else {
+      // Step 2b: no subs → fall back to audio download + Whisper.
+      const audio = await downloadAudio(youtubeId);
+      audioPath = audio.path;
+      const result = await transcribe(audio.path);
+      const lines = await buildLines(result);
+      await videoRepo.markReady(video.id, lines, result.language);
+    }
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     if (createdId) await videoRepo.markFailed(createdId, message);
